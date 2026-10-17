@@ -1,0 +1,110 @@
+meta:
+  version: PLCN_v3
+  update_url: 'https://raw.githubusercontent.com/pelican-eggs/games-steamcmd/refs/heads/main/enshrouded/egg-enshrouded.yaml'
+  name: 'Enshrouded'
+  author: 'eggs@goover.dev'
+  description: 'Enshrouded is a game of survival, crafting, and Action RPG combat, set within a sprawling voxel-based continent.'
+  icon: 'https://raw.githubusercontent.com/pelican-eggs/games-steamcmd/main/enshrouded/enshrouded-icon.webp'
+  uuid: 'c3693923-5f13-44b7-8a46-b563f0f93d93'
+
+startup: |-
+  ./enshrouded_server.exe
+
+config:
+  files: |
+    {
+        "enshrouded_server.json": {
+            "parser": "json",
+            "find": {
+                "name": "{{server.build.env.SERVER_NAME}}",
+                "password": "{{server.build.env.SERVER_PASSWORD}}",
+                "queryPort": "{{server.build.default.port}}",
+                "slotCount": "{{server.build.env.SERVER_SLOTS}}"
+            }
+        }
+    }
+  logs: |
+    {
+        "custom": {
+            "parser": "regex",
+            "find": ".*"
+        }
+    }
+  stop: 'stop'
+
+scripts:
+  installation: |
+    #!/bin/bash
+    # SteamCMD App ID for Enshrouded Dedicated Server
+    STEAMCMD_APP_ID="2278520"
+
+    # Install/Update the server using SteamCMD
+    # (The yolk image usually has steamcmd pre-installed, but we ensure it is called correctly)
+    if [ -f /usr/bin/steamcmd ]; then
+        steamcmd +force_install_dir /mnt/server +login anonymous +app_update ${STEAMCMD_APP_ID} validate +quit
+    else
+        echo "SteamCMD not found. Please use a compatible yolk image (e.g., ghcr.io/pelican-eggs/yolks:steamcmd)."
+        exit 1
+    fi
+
+    # Ensure the configuration directory exists
+    mkdir -p /mnt/server
+
+    echo "Installation complete."
+
+variables:
+  SERVER_NAME:
+    name: "Server Name"
+    description: "The name of your Enshrouded server."
+    env_variable: "SERVER_NAME"
+    default_value: "Enshrouded Server"
+    user_viewable: true
+    user_editable: true
+    rules: "required|string|max:64"
+
+  SERVER_PASSWORD:
+    name: "Server Password"
+    description: "The password to join your server. Must contain at least one letter to avoid JSON parsing errors."
+    env_variable: "SERVER_PASSWORD"
+    default_value: "changeme123"
+    user_viewable: true
+    user_editable: true
+    rules: "required|string|max:64"
+
+  SERVER_SLOTS:
+    name: "Player Slots"
+    description: "Maximum number of players allowed on the server."
+    env_variable: "SERVER_SLOTS"
+    default_value: "16"
+    user_viewable: true
+    user_editable: true
+    rules: "required|integer|between:1,16"
+
+  SERVER_PORT:
+    name: "Game Port"
+    description: "The UDP port for the game traffic."
+    env_variable: "SERVER_PORT"
+    default_value: "15636"
+    user_viewable: false
+    user_editable: false
+    rules: "required|integer|between:1024,65535"
+
+  SERVER_QUERY_PORT:
+    name: "Query Port"
+    description: "The UDP port for Steam queries."
+    env_variable: "SERVER_QUERY_PORT"
+    default_value: "15637"
+    user_viewable: false
+    user_editable: false
+    rules: "required|integer|between:1024,65535"
+
+docker:
+  image: 'ghcr.io/pelican-eggs/yolks:steamcmd'
+  entrypoint: 'bash'
+  internal_port: 15636
+
+allocations:
+  default:
+    ports:
+      - '15636:15636/udp'
+      - '15637:15637/udp'
