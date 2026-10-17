@@ -23,22 +23,31 @@ startup_commands:
     : > ./logs/enshrouded_server.log
     export PROTON_USE_XALIA=0
 
-    # Start log forwarding before Proton so Pelican can detect HostOnline.
+    # Forward log output so Pelican can detect the server-ready message.
     tail -n0 -F ./logs/enshrouded_server.log &
     TAIL_PID=$!
     sleep 1
 
     proton run ./enshrouded_server.exe &
     PROTON_PID=$!
-    CLEANED=0
 
     cleanup() {
-      [ "$CLEANED" = 1 ] && return
-      CLEANED=1
       trap - INT TERM EXIT
+      kill -TERM "$TAIL_PID" 2>/dev/null || true
+      kill -TERM "$PROTON_PID" 2>/dev/null || true
+      # Enshrouded may outlive the Proton launcher; target only this server executable.
+      pkill -TERM -f '^(\./)?enshrouded_server\.exe$' 2>/dev/null || true
+      sleep 2
+      pkill -KILL -f '^(\./)?enshrouded_server\.exe$' 2>/dev/null || true
+      wait "$TAIL_PID" 2>/dev/null || true
+      wait "$PROTON_PID" 2>/dev/null || true
+    }
 
-      # The game process can outlive the Proton wrapper; stop it explicitly first.
-      pkill -TERM -f '^(\./)?enshrouded_server\.exe
+    trap cleanup INT TERM
+    wait "$PROTON_PID"
+    SERVER_EXIT=$?
+    cleanup
+    exit "$SERVER_EXIT"
 config:
   files:
     enshrouded_server.json:
