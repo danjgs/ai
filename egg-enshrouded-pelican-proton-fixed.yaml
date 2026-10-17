@@ -8,8 +8,8 @@ author: 'Custom adaptation based on blackstormlab/games-steamcmd'
 uuid: c3693923-5f13-44b7-8a46-b563f0f93d93
 description: |-
   Enshrouded dedicated server using the Pelican Steam Proton image.
-  Startup disables Xalia for headless use, clears stale logs, attaches log-following
-  before launching Proton, and keeps Proton in the foreground for process tracking.
+  Startup forwards logs from the beginning and cleans up the Enshrouded, Steam,
+  Proton and Wine processes on stop to support reliable subsequent starts.
 tags: {}
 features:
   - steam_disk_space
@@ -17,7 +17,1017 @@ docker_images:
   'Steam Proton': 'ghcr.io/pelican-eggs/steamcmd:proton'
 file_denylist: {}
 startup_commands:
-  Default: 'mkdir -p ./logs || exit 1; : > ./logs/enshrouded_server.log; (tail -n0 -F ./logs/enshrouded_server.log) & TAIL_PID=$!; sleep 1; export PROTON_USE_XALIA=0; proton run ./enshrouded_server.exe; SERVER_EXIT=$?; kill "$TAIL_PID" 2>/dev/null || true; wait "$TAIL_PID" 2>/dev/null || true; exit "$SERVER_EXIT"'
+  Default: |-
+    set +e
+    mkdir -p ./logs || exit 1
+    : > ./logs/enshrouded_server.log
+    export PROTON_USE_XALIA=0
+
+    # Start log forwarding before Proton so Pelican can detect HostOnline.
+    tail -n0 -F ./logs/enshrouded_server.log &
+    TAIL_PID=$!
+    sleep 1
+
+    proton run ./enshrouded_server.exe &
+    PROTON_PID=$!
+    CLEANED=0
+
+    cleanup() {
+      [ "$CLEANED" = 1 ] && return
+      CLEANED=1
+      trap - INT TERM EXIT
+
+      # The game process can outlive the Proton wrapper; stop it explicitly first.
+      pkill -TERM -f '^(\./)?enshrouded_server\.exe
+config:
+  files:
+    enshrouded_server.json:
+      parser: json
+      find:
+        name: '{{server.environment.SRV_NAME}}'
+        slotCount: '{{server.environment.MAX_PLAYERS}}'
+        queryPort: '{{server.environment.QUERY_PORT}}'
+        gameSettingsPreset: '{{server.environment.DIFFICULT_PRESET}}'
+  startup:
+    done: "[Session] 'HostOnline' (up)!"
+  logs: {}
+  stop: ^C
+scripts:
+  installation:
+    script: |-
+      #!/bin/bash
+      # SteamCMD base installation script
+      clear
+      RED='\033[0;31m'
+      GREEN='\033[0;32m'
+      YELLOW='\033[1;33m'
+      BLUE='\033[0;34m'
+      NC='\033[0m'
+      echo -e "${BLUE}-------------------------------------------------${NC}"
+      echo -e "${YELLOW}Enshrouded Installscript${NC}"
+      echo -e "${YELLOW}Egg by gOOvER | https://goover.dev${NC}"
+      echo -e "${BLUE}-------------------------------------------------${NC}"
+
+      #apt -y update
+      #apt -y --no-install-recommends install curl lib32gcc-s1 ca-certificates jq dos2unix
+      echo -e "${BLUE}-------------------------------------------------${NC}"
+      echo -e "${YELLOW}download and install steamcmd. please wait...${NC}"
+      echo -e "${BLUE}-------------------------------------------------${NC}"
+      ## just in case someone removed the defaults.
+      if [[ "${STEAM_USER}" == "" ]] || [[ "${STEAM_PASS}" == "" ]]; then
+          echo -e "steam user is not set.\n"
+          echo -e "Using anonymous user.\n"
+          STEAM_USER=anonymous
+          STEAM_PASS=""
+          STEAM_AUTH=""
+      else
+          echo -e "user set to ${STEAM_USER}"
+      fi
+      ## download and install steamcmd
+      cd /tmp
+      mkdir -p /mnt/server/steamcmd
+      curl -sSL -o steamcmd.tar.gz https://steamcdn-a.akamaihd.net/client/installer/steamcmd_linux.tar.gz
+      tar -xzvf steamcmd.tar.gz -C /mnt/server/steamcmd
+      mkdir -p /mnt/server/steamapps # Fix steamcmd disk write error when this folder is missing
+      cd /mnt/server/steamcmd
+      # SteamCMD fails otherwise for some reason, even running as root.
+      # This is changed at the end of the install process anyways.
+      chown -R root:root /mnt
+      export HOME=/mnt/server
+      echo -e "${GREEN}..done..${NC}"
+
+      ## install game using steamcmd
+      echo -e "${BLUE}-------------------------------------------------${NC}"
+      echo -e "${YELLOW}install game using steamcmd. please wait...${NC}"
+      echo -e "${BLUE}-------------------------------------------------${NC}"
+      ./steamcmd.sh +force_install_dir /mnt/server +login ${STEAM_USER} ${STEAM_PASS} ${STEAM_AUTH} $( [[ "${WINDOWS_INSTALL}" == "1" ]] && printf %s '+@sSteamCmdForcePlatformType windows' ) $( [[ "${STEAM_SDK}" == "1" ]] && printf %s '+app_update 1007' ) +app_update ${STEAM_APPID} $( [[ -z ${STEAM_BETAID} ]] || printf %s "-beta ${STEAM_BETAID}" ) $( [[ -z ${STEAM_BETAPASS} ]] || printf %s "-betapassword ${STEAM_BETAPASS}" ) ${INSTALL_FLAGS} validate +quit
+      echo -e "${GREEN}..done..${NC}"
+      ## set up 32 bit libraries
+      mkdir -p /mnt/server/.steam/sdk32
+      cp -v linux32/steamclient.so ../.steam/sdk32/steamclient.so
+
+      ## set up 64 bit libraries
+      mkdir -p /mnt/server/.steam/sdk64
+      cp -v linux64/steamclient.so ../.steam/sdk64/steamclient.so
+      # add below your custom commands if needed
+      FILE=$HOME/enshrouded_server.json
+      if [ -f "$FILE" ]; then
+        echo -e "${BLUE}-------------------------------------------------${NC}"
+        echo -e "${GREEN}enshrouded_server.json found.${NC}"
+        echo -e "${BLUE}-------------------------------------------------${NC}"
+      else
+        echo -e "${BLUE}-------------------------------------------------${NC}"
+        echo -e "${RED}No enshrouded_server.json found. Downloading default...${NC}"
+        echo -e "${BLUE}-------------------------------------------------${NC}"
+        cd "$HOME"
+        curl -sSL -o enshrouded_server.json https://raw.githubusercontent.com/pelican-eggs/games-steamcmd/refs/heads/main/enshrouded/enshrouded_server.json
+        echo -e "${GREEN}..done..${NC}"
+      fi
+      ## install end
+      echo -e "${BLUE}-------------------------------------------------${NC}"
+      echo -e "${GREEN}Installation completed...${NC}"
+      echo -e "${BLUE}-------------------------------------------------${NC}"
+    container: 'ghcr.io/pelican-eggs/installers:debian'
+    entrypoint: bash
+variables:
+  -
+    name: '[SERVER] Steam Query Port'
+    description: 'Steam Query Port'
+    env_variable: QUERY_PORT
+    default_value: '15637'
+    user_viewable: true
+    user_editable: true
+    rules:
+      - required
+      - numeric
+    sort: 1
+  -
+    name: '[SERVER] Auto Update'
+    description: 'Enable automatic updates on boot'
+    env_variable: AUTO_UPDATE
+    default_value: 1
+    user_viewable: true
+    user_editable: true
+    rules:
+      - required
+      - boolean
+    sort: 2
+  -
+    name: '[SERVER] Server Name'
+    description: 'Name of the server'
+    env_variable: SRV_NAME
+    default_value: 'My Server'
+    user_viewable: true
+    user_editable: true
+    rules:
+      - required
+      - string
+    sort: 3
+  -
+    name: '[SERVER] Max Players'
+    description: 'Maximum number of players allowed'
+    env_variable: MAX_PLAYERS
+    default_value: 24
+    user_viewable: true
+    user_editable: true
+    rules:
+      - required
+      - numeric
+    sort: 4
+  -
+    name: '[SERVER] Save Name'
+    description: 'Name of the save-file for the server'
+    env_variable: SAVE_NAME
+    default_value: DedicatedSaveMP
+    user_viewable: true
+    user_editable: true
+    rules:
+      - required
+      - string
+    sort: 5
+  -
+    name: '[STEAM] Steam App ID'
+    description: 'Steam App ID'
+    env_variable: SRCDS_APPID
+    default_value: 2278520
+    user_viewable: false
+    user_editable: false
+    rules:
+      - required
+      - string
+      - 'in:2278520'
+    sort: 6
+  -
+    name: '[SYSTEM] WINDOWS_INSTALL'
+    description: 'DO NOT CHANGE !!!'
+    env_variable: WINDOWS_INSTALL
+    default_value: 1
+    user_viewable: false
+    user_editable: false
+    rules:
+      - required
+      - boolean
+    sort: 7
+  -
+    name: '[SYSTEM] Validate'
+    description: 'Validate the serverfiles through Steam'
+    env_variable: VALIDATE
+    default_value: 0
+    user_viewable: true
+    user_editable: true
+    rules:
+      - required
+      - boolean
+    sort: 8
+  -
+    name: '[SERVER] Difficult Preset'
+    description: 'Difficulty preset for Enshrouded server settings'
+    env_variable: DIFFICULT_PRESET
+    default_value: Default
+    user_viewable: true
+    user_editable: true
+    rules:
+      - required
+      - string
+      - 'in:Default,Relaxed,Hard,Survival,Custom'
+    sort: 9
+ 2>/dev/null || true
+      for _ in $(seq 1 20); do
+        pgrep -f '^(\./)?enshrouded_server\.exe
+config:
+  files:
+    enshrouded_server.json:
+      parser: json
+      find:
+        name: '{{server.environment.SRV_NAME}}'
+        slotCount: '{{server.environment.MAX_PLAYERS}}'
+        queryPort: '{{server.environment.QUERY_PORT}}'
+        gameSettingsPreset: '{{server.environment.DIFFICULT_PRESET}}'
+  startup:
+    done: "[Session] 'HostOnline' (up)!"
+  logs: {}
+  stop: ^C
+scripts:
+  installation:
+    script: |-
+      #!/bin/bash
+      # SteamCMD base installation script
+      clear
+      RED='\033[0;31m'
+      GREEN='\033[0;32m'
+      YELLOW='\033[1;33m'
+      BLUE='\033[0;34m'
+      NC='\033[0m'
+      echo -e "${BLUE}-------------------------------------------------${NC}"
+      echo -e "${YELLOW}Enshrouded Installscript${NC}"
+      echo -e "${YELLOW}Egg by gOOvER | https://goover.dev${NC}"
+      echo -e "${BLUE}-------------------------------------------------${NC}"
+
+      #apt -y update
+      #apt -y --no-install-recommends install curl lib32gcc-s1 ca-certificates jq dos2unix
+      echo -e "${BLUE}-------------------------------------------------${NC}"
+      echo -e "${YELLOW}download and install steamcmd. please wait...${NC}"
+      echo -e "${BLUE}-------------------------------------------------${NC}"
+      ## just in case someone removed the defaults.
+      if [[ "${STEAM_USER}" == "" ]] || [[ "${STEAM_PASS}" == "" ]]; then
+          echo -e "steam user is not set.\n"
+          echo -e "Using anonymous user.\n"
+          STEAM_USER=anonymous
+          STEAM_PASS=""
+          STEAM_AUTH=""
+      else
+          echo -e "user set to ${STEAM_USER}"
+      fi
+      ## download and install steamcmd
+      cd /tmp
+      mkdir -p /mnt/server/steamcmd
+      curl -sSL -o steamcmd.tar.gz https://steamcdn-a.akamaihd.net/client/installer/steamcmd_linux.tar.gz
+      tar -xzvf steamcmd.tar.gz -C /mnt/server/steamcmd
+      mkdir -p /mnt/server/steamapps # Fix steamcmd disk write error when this folder is missing
+      cd /mnt/server/steamcmd
+      # SteamCMD fails otherwise for some reason, even running as root.
+      # This is changed at the end of the install process anyways.
+      chown -R root:root /mnt
+      export HOME=/mnt/server
+      echo -e "${GREEN}..done..${NC}"
+
+      ## install game using steamcmd
+      echo -e "${BLUE}-------------------------------------------------${NC}"
+      echo -e "${YELLOW}install game using steamcmd. please wait...${NC}"
+      echo -e "${BLUE}-------------------------------------------------${NC}"
+      ./steamcmd.sh +force_install_dir /mnt/server +login ${STEAM_USER} ${STEAM_PASS} ${STEAM_AUTH} $( [[ "${WINDOWS_INSTALL}" == "1" ]] && printf %s '+@sSteamCmdForcePlatformType windows' ) $( [[ "${STEAM_SDK}" == "1" ]] && printf %s '+app_update 1007' ) +app_update ${STEAM_APPID} $( [[ -z ${STEAM_BETAID} ]] || printf %s "-beta ${STEAM_BETAID}" ) $( [[ -z ${STEAM_BETAPASS} ]] || printf %s "-betapassword ${STEAM_BETAPASS}" ) ${INSTALL_FLAGS} validate +quit
+      echo -e "${GREEN}..done..${NC}"
+      ## set up 32 bit libraries
+      mkdir -p /mnt/server/.steam/sdk32
+      cp -v linux32/steamclient.so ../.steam/sdk32/steamclient.so
+
+      ## set up 64 bit libraries
+      mkdir -p /mnt/server/.steam/sdk64
+      cp -v linux64/steamclient.so ../.steam/sdk64/steamclient.so
+      # add below your custom commands if needed
+      FILE=$HOME/enshrouded_server.json
+      if [ -f "$FILE" ]; then
+        echo -e "${BLUE}-------------------------------------------------${NC}"
+        echo -e "${GREEN}enshrouded_server.json found.${NC}"
+        echo -e "${BLUE}-------------------------------------------------${NC}"
+      else
+        echo -e "${BLUE}-------------------------------------------------${NC}"
+        echo -e "${RED}No enshrouded_server.json found. Downloading default...${NC}"
+        echo -e "${BLUE}-------------------------------------------------${NC}"
+        cd "$HOME"
+        curl -sSL -o enshrouded_server.json https://raw.githubusercontent.com/pelican-eggs/games-steamcmd/refs/heads/main/enshrouded/enshrouded_server.json
+        echo -e "${GREEN}..done..${NC}"
+      fi
+      ## install end
+      echo -e "${BLUE}-------------------------------------------------${NC}"
+      echo -e "${GREEN}Installation completed...${NC}"
+      echo -e "${BLUE}-------------------------------------------------${NC}"
+    container: 'ghcr.io/pelican-eggs/installers:debian'
+    entrypoint: bash
+variables:
+  -
+    name: '[SERVER] Steam Query Port'
+    description: 'Steam Query Port'
+    env_variable: QUERY_PORT
+    default_value: '15637'
+    user_viewable: true
+    user_editable: true
+    rules:
+      - required
+      - numeric
+    sort: 1
+  -
+    name: '[SERVER] Auto Update'
+    description: 'Enable automatic updates on boot'
+    env_variable: AUTO_UPDATE
+    default_value: 1
+    user_viewable: true
+    user_editable: true
+    rules:
+      - required
+      - boolean
+    sort: 2
+  -
+    name: '[SERVER] Server Name'
+    description: 'Name of the server'
+    env_variable: SRV_NAME
+    default_value: 'My Server'
+    user_viewable: true
+    user_editable: true
+    rules:
+      - required
+      - string
+    sort: 3
+  -
+    name: '[SERVER] Max Players'
+    description: 'Maximum number of players allowed'
+    env_variable: MAX_PLAYERS
+    default_value: 24
+    user_viewable: true
+    user_editable: true
+    rules:
+      - required
+      - numeric
+    sort: 4
+  -
+    name: '[SERVER] Save Name'
+    description: 'Name of the save-file for the server'
+    env_variable: SAVE_NAME
+    default_value: DedicatedSaveMP
+    user_viewable: true
+    user_editable: true
+    rules:
+      - required
+      - string
+    sort: 5
+  -
+    name: '[STEAM] Steam App ID'
+    description: 'Steam App ID'
+    env_variable: SRCDS_APPID
+    default_value: 2278520
+    user_viewable: false
+    user_editable: false
+    rules:
+      - required
+      - string
+      - 'in:2278520'
+    sort: 6
+  -
+    name: '[SYSTEM] WINDOWS_INSTALL'
+    description: 'DO NOT CHANGE !!!'
+    env_variable: WINDOWS_INSTALL
+    default_value: 1
+    user_viewable: false
+    user_editable: false
+    rules:
+      - required
+      - boolean
+    sort: 7
+  -
+    name: '[SYSTEM] Validate'
+    description: 'Validate the serverfiles through Steam'
+    env_variable: VALIDATE
+    default_value: 0
+    user_viewable: true
+    user_editable: true
+    rules:
+      - required
+      - boolean
+    sort: 8
+  -
+    name: '[SERVER] Difficult Preset'
+    description: 'Difficulty preset for Enshrouded server settings'
+    env_variable: DIFFICULT_PRESET
+    default_value: Default
+    user_viewable: true
+    user_editable: true
+    rules:
+      - required
+      - string
+      - 'in:Default,Relaxed,Hard,Survival,Custom'
+    sort: 9
+ >/dev/null 2>&1 || break
+        sleep 1
+      done
+
+      # Stop this container's Steam shim, Proton wrapper, and Wine server.
+      pkill -TERM -i -f 'steam\.exe ./enshrouded_server\.exe
+config:
+  files:
+    enshrouded_server.json:
+      parser: json
+      find:
+        name: '{{server.environment.SRV_NAME}}'
+        slotCount: '{{server.environment.MAX_PLAYERS}}'
+        queryPort: '{{server.environment.QUERY_PORT}}'
+        gameSettingsPreset: '{{server.environment.DIFFICULT_PRESET}}'
+  startup:
+    done: "[Session] 'HostOnline' (up)!"
+  logs: {}
+  stop: ^C
+scripts:
+  installation:
+    script: |-
+      #!/bin/bash
+      # SteamCMD base installation script
+      clear
+      RED='\033[0;31m'
+      GREEN='\033[0;32m'
+      YELLOW='\033[1;33m'
+      BLUE='\033[0;34m'
+      NC='\033[0m'
+      echo -e "${BLUE}-------------------------------------------------${NC}"
+      echo -e "${YELLOW}Enshrouded Installscript${NC}"
+      echo -e "${YELLOW}Egg by gOOvER | https://goover.dev${NC}"
+      echo -e "${BLUE}-------------------------------------------------${NC}"
+
+      #apt -y update
+      #apt -y --no-install-recommends install curl lib32gcc-s1 ca-certificates jq dos2unix
+      echo -e "${BLUE}-------------------------------------------------${NC}"
+      echo -e "${YELLOW}download and install steamcmd. please wait...${NC}"
+      echo -e "${BLUE}-------------------------------------------------${NC}"
+      ## just in case someone removed the defaults.
+      if [[ "${STEAM_USER}" == "" ]] || [[ "${STEAM_PASS}" == "" ]]; then
+          echo -e "steam user is not set.\n"
+          echo -e "Using anonymous user.\n"
+          STEAM_USER=anonymous
+          STEAM_PASS=""
+          STEAM_AUTH=""
+      else
+          echo -e "user set to ${STEAM_USER}"
+      fi
+      ## download and install steamcmd
+      cd /tmp
+      mkdir -p /mnt/server/steamcmd
+      curl -sSL -o steamcmd.tar.gz https://steamcdn-a.akamaihd.net/client/installer/steamcmd_linux.tar.gz
+      tar -xzvf steamcmd.tar.gz -C /mnt/server/steamcmd
+      mkdir -p /mnt/server/steamapps # Fix steamcmd disk write error when this folder is missing
+      cd /mnt/server/steamcmd
+      # SteamCMD fails otherwise for some reason, even running as root.
+      # This is changed at the end of the install process anyways.
+      chown -R root:root /mnt
+      export HOME=/mnt/server
+      echo -e "${GREEN}..done..${NC}"
+
+      ## install game using steamcmd
+      echo -e "${BLUE}-------------------------------------------------${NC}"
+      echo -e "${YELLOW}install game using steamcmd. please wait...${NC}"
+      echo -e "${BLUE}-------------------------------------------------${NC}"
+      ./steamcmd.sh +force_install_dir /mnt/server +login ${STEAM_USER} ${STEAM_PASS} ${STEAM_AUTH} $( [[ "${WINDOWS_INSTALL}" == "1" ]] && printf %s '+@sSteamCmdForcePlatformType windows' ) $( [[ "${STEAM_SDK}" == "1" ]] && printf %s '+app_update 1007' ) +app_update ${STEAM_APPID} $( [[ -z ${STEAM_BETAID} ]] || printf %s "-beta ${STEAM_BETAID}" ) $( [[ -z ${STEAM_BETAPASS} ]] || printf %s "-betapassword ${STEAM_BETAPASS}" ) ${INSTALL_FLAGS} validate +quit
+      echo -e "${GREEN}..done..${NC}"
+      ## set up 32 bit libraries
+      mkdir -p /mnt/server/.steam/sdk32
+      cp -v linux32/steamclient.so ../.steam/sdk32/steamclient.so
+
+      ## set up 64 bit libraries
+      mkdir -p /mnt/server/.steam/sdk64
+      cp -v linux64/steamclient.so ../.steam/sdk64/steamclient.so
+      # add below your custom commands if needed
+      FILE=$HOME/enshrouded_server.json
+      if [ -f "$FILE" ]; then
+        echo -e "${BLUE}-------------------------------------------------${NC}"
+        echo -e "${GREEN}enshrouded_server.json found.${NC}"
+        echo -e "${BLUE}-------------------------------------------------${NC}"
+      else
+        echo -e "${BLUE}-------------------------------------------------${NC}"
+        echo -e "${RED}No enshrouded_server.json found. Downloading default...${NC}"
+        echo -e "${BLUE}-------------------------------------------------${NC}"
+        cd "$HOME"
+        curl -sSL -o enshrouded_server.json https://raw.githubusercontent.com/pelican-eggs/games-steamcmd/refs/heads/main/enshrouded/enshrouded_server.json
+        echo -e "${GREEN}..done..${NC}"
+      fi
+      ## install end
+      echo -e "${BLUE}-------------------------------------------------${NC}"
+      echo -e "${GREEN}Installation completed...${NC}"
+      echo -e "${BLUE}-------------------------------------------------${NC}"
+    container: 'ghcr.io/pelican-eggs/installers:debian'
+    entrypoint: bash
+variables:
+  -
+    name: '[SERVER] Steam Query Port'
+    description: 'Steam Query Port'
+    env_variable: QUERY_PORT
+    default_value: '15637'
+    user_viewable: true
+    user_editable: true
+    rules:
+      - required
+      - numeric
+    sort: 1
+  -
+    name: '[SERVER] Auto Update'
+    description: 'Enable automatic updates on boot'
+    env_variable: AUTO_UPDATE
+    default_value: 1
+    user_viewable: true
+    user_editable: true
+    rules:
+      - required
+      - boolean
+    sort: 2
+  -
+    name: '[SERVER] Server Name'
+    description: 'Name of the server'
+    env_variable: SRV_NAME
+    default_value: 'My Server'
+    user_viewable: true
+    user_editable: true
+    rules:
+      - required
+      - string
+    sort: 3
+  -
+    name: '[SERVER] Max Players'
+    description: 'Maximum number of players allowed'
+    env_variable: MAX_PLAYERS
+    default_value: 24
+    user_viewable: true
+    user_editable: true
+    rules:
+      - required
+      - numeric
+    sort: 4
+  -
+    name: '[SERVER] Save Name'
+    description: 'Name of the save-file for the server'
+    env_variable: SAVE_NAME
+    default_value: DedicatedSaveMP
+    user_viewable: true
+    user_editable: true
+    rules:
+      - required
+      - string
+    sort: 5
+  -
+    name: '[STEAM] Steam App ID'
+    description: 'Steam App ID'
+    env_variable: SRCDS_APPID
+    default_value: 2278520
+    user_viewable: false
+    user_editable: false
+    rules:
+      - required
+      - string
+      - 'in:2278520'
+    sort: 6
+  -
+    name: '[SYSTEM] WINDOWS_INSTALL'
+    description: 'DO NOT CHANGE !!!'
+    env_variable: WINDOWS_INSTALL
+    default_value: 1
+    user_viewable: false
+    user_editable: false
+    rules:
+      - required
+      - boolean
+    sort: 7
+  -
+    name: '[SYSTEM] Validate'
+    description: 'Validate the serverfiles through Steam'
+    env_variable: VALIDATE
+    default_value: 0
+    user_viewable: true
+    user_editable: true
+    rules:
+      - required
+      - boolean
+    sort: 8
+  -
+    name: '[SERVER] Difficult Preset'
+    description: 'Difficulty preset for Enshrouded server settings'
+    env_variable: DIFFICULT_PRESET
+    default_value: Default
+    user_viewable: true
+    user_editable: true
+    rules:
+      - required
+      - string
+      - 'in:Default,Relaxed,Hard,Survival,Custom'
+    sort: 9
+ 2>/dev/null || true
+      kill -TERM "$PROTON_PID" 2>/dev/null || true
+      pkill -TERM -x wineserver 2>/dev/null || true
+      sleep 1
+      pkill -KILL -f '^(\./)?enshrouded_server\.exe
+config:
+  files:
+    enshrouded_server.json:
+      parser: json
+      find:
+        name: '{{server.environment.SRV_NAME}}'
+        slotCount: '{{server.environment.MAX_PLAYERS}}'
+        queryPort: '{{server.environment.QUERY_PORT}}'
+        gameSettingsPreset: '{{server.environment.DIFFICULT_PRESET}}'
+  startup:
+    done: "[Session] 'HostOnline' (up)!"
+  logs: {}
+  stop: ^C
+scripts:
+  installation:
+    script: |-
+      #!/bin/bash
+      # SteamCMD base installation script
+      clear
+      RED='\033[0;31m'
+      GREEN='\033[0;32m'
+      YELLOW='\033[1;33m'
+      BLUE='\033[0;34m'
+      NC='\033[0m'
+      echo -e "${BLUE}-------------------------------------------------${NC}"
+      echo -e "${YELLOW}Enshrouded Installscript${NC}"
+      echo -e "${YELLOW}Egg by gOOvER | https://goover.dev${NC}"
+      echo -e "${BLUE}-------------------------------------------------${NC}"
+
+      #apt -y update
+      #apt -y --no-install-recommends install curl lib32gcc-s1 ca-certificates jq dos2unix
+      echo -e "${BLUE}-------------------------------------------------${NC}"
+      echo -e "${YELLOW}download and install steamcmd. please wait...${NC}"
+      echo -e "${BLUE}-------------------------------------------------${NC}"
+      ## just in case someone removed the defaults.
+      if [[ "${STEAM_USER}" == "" ]] || [[ "${STEAM_PASS}" == "" ]]; then
+          echo -e "steam user is not set.\n"
+          echo -e "Using anonymous user.\n"
+          STEAM_USER=anonymous
+          STEAM_PASS=""
+          STEAM_AUTH=""
+      else
+          echo -e "user set to ${STEAM_USER}"
+      fi
+      ## download and install steamcmd
+      cd /tmp
+      mkdir -p /mnt/server/steamcmd
+      curl -sSL -o steamcmd.tar.gz https://steamcdn-a.akamaihd.net/client/installer/steamcmd_linux.tar.gz
+      tar -xzvf steamcmd.tar.gz -C /mnt/server/steamcmd
+      mkdir -p /mnt/server/steamapps # Fix steamcmd disk write error when this folder is missing
+      cd /mnt/server/steamcmd
+      # SteamCMD fails otherwise for some reason, even running as root.
+      # This is changed at the end of the install process anyways.
+      chown -R root:root /mnt
+      export HOME=/mnt/server
+      echo -e "${GREEN}..done..${NC}"
+
+      ## install game using steamcmd
+      echo -e "${BLUE}-------------------------------------------------${NC}"
+      echo -e "${YELLOW}install game using steamcmd. please wait...${NC}"
+      echo -e "${BLUE}-------------------------------------------------${NC}"
+      ./steamcmd.sh +force_install_dir /mnt/server +login ${STEAM_USER} ${STEAM_PASS} ${STEAM_AUTH} $( [[ "${WINDOWS_INSTALL}" == "1" ]] && printf %s '+@sSteamCmdForcePlatformType windows' ) $( [[ "${STEAM_SDK}" == "1" ]] && printf %s '+app_update 1007' ) +app_update ${STEAM_APPID} $( [[ -z ${STEAM_BETAID} ]] || printf %s "-beta ${STEAM_BETAID}" ) $( [[ -z ${STEAM_BETAPASS} ]] || printf %s "-betapassword ${STEAM_BETAPASS}" ) ${INSTALL_FLAGS} validate +quit
+      echo -e "${GREEN}..done..${NC}"
+      ## set up 32 bit libraries
+      mkdir -p /mnt/server/.steam/sdk32
+      cp -v linux32/steamclient.so ../.steam/sdk32/steamclient.so
+
+      ## set up 64 bit libraries
+      mkdir -p /mnt/server/.steam/sdk64
+      cp -v linux64/steamclient.so ../.steam/sdk64/steamclient.so
+      # add below your custom commands if needed
+      FILE=$HOME/enshrouded_server.json
+      if [ -f "$FILE" ]; then
+        echo -e "${BLUE}-------------------------------------------------${NC}"
+        echo -e "${GREEN}enshrouded_server.json found.${NC}"
+        echo -e "${BLUE}-------------------------------------------------${NC}"
+      else
+        echo -e "${BLUE}-------------------------------------------------${NC}"
+        echo -e "${RED}No enshrouded_server.json found. Downloading default...${NC}"
+        echo -e "${BLUE}-------------------------------------------------${NC}"
+        cd "$HOME"
+        curl -sSL -o enshrouded_server.json https://raw.githubusercontent.com/pelican-eggs/games-steamcmd/refs/heads/main/enshrouded/enshrouded_server.json
+        echo -e "${GREEN}..done..${NC}"
+      fi
+      ## install end
+      echo -e "${BLUE}-------------------------------------------------${NC}"
+      echo -e "${GREEN}Installation completed...${NC}"
+      echo -e "${BLUE}-------------------------------------------------${NC}"
+    container: 'ghcr.io/pelican-eggs/installers:debian'
+    entrypoint: bash
+variables:
+  -
+    name: '[SERVER] Steam Query Port'
+    description: 'Steam Query Port'
+    env_variable: QUERY_PORT
+    default_value: '15637'
+    user_viewable: true
+    user_editable: true
+    rules:
+      - required
+      - numeric
+    sort: 1
+  -
+    name: '[SERVER] Auto Update'
+    description: 'Enable automatic updates on boot'
+    env_variable: AUTO_UPDATE
+    default_value: 1
+    user_viewable: true
+    user_editable: true
+    rules:
+      - required
+      - boolean
+    sort: 2
+  -
+    name: '[SERVER] Server Name'
+    description: 'Name of the server'
+    env_variable: SRV_NAME
+    default_value: 'My Server'
+    user_viewable: true
+    user_editable: true
+    rules:
+      - required
+      - string
+    sort: 3
+  -
+    name: '[SERVER] Max Players'
+    description: 'Maximum number of players allowed'
+    env_variable: MAX_PLAYERS
+    default_value: 24
+    user_viewable: true
+    user_editable: true
+    rules:
+      - required
+      - numeric
+    sort: 4
+  -
+    name: '[SERVER] Save Name'
+    description: 'Name of the save-file for the server'
+    env_variable: SAVE_NAME
+    default_value: DedicatedSaveMP
+    user_viewable: true
+    user_editable: true
+    rules:
+      - required
+      - string
+    sort: 5
+  -
+    name: '[STEAM] Steam App ID'
+    description: 'Steam App ID'
+    env_variable: SRCDS_APPID
+    default_value: 2278520
+    user_viewable: false
+    user_editable: false
+    rules:
+      - required
+      - string
+      - 'in:2278520'
+    sort: 6
+  -
+    name: '[SYSTEM] WINDOWS_INSTALL'
+    description: 'DO NOT CHANGE !!!'
+    env_variable: WINDOWS_INSTALL
+    default_value: 1
+    user_viewable: false
+    user_editable: false
+    rules:
+      - required
+      - boolean
+    sort: 7
+  -
+    name: '[SYSTEM] Validate'
+    description: 'Validate the serverfiles through Steam'
+    env_variable: VALIDATE
+    default_value: 0
+    user_viewable: true
+    user_editable: true
+    rules:
+      - required
+      - boolean
+    sort: 8
+  -
+    name: '[SERVER] Difficult Preset'
+    description: 'Difficulty preset for Enshrouded server settings'
+    env_variable: DIFFICULT_PRESET
+    default_value: Default
+    user_viewable: true
+    user_editable: true
+    rules:
+      - required
+      - string
+      - 'in:Default,Relaxed,Hard,Survival,Custom'
+    sort: 9
+ 2>/dev/null || true
+      pkill -KILL -i -f 'steam\.exe ./enshrouded_server\.exe
+config:
+  files:
+    enshrouded_server.json:
+      parser: json
+      find:
+        name: '{{server.environment.SRV_NAME}}'
+        slotCount: '{{server.environment.MAX_PLAYERS}}'
+        queryPort: '{{server.environment.QUERY_PORT}}'
+        gameSettingsPreset: '{{server.environment.DIFFICULT_PRESET}}'
+  startup:
+    done: "[Session] 'HostOnline' (up)!"
+  logs: {}
+  stop: ^C
+scripts:
+  installation:
+    script: |-
+      #!/bin/bash
+      # SteamCMD base installation script
+      clear
+      RED='\033[0;31m'
+      GREEN='\033[0;32m'
+      YELLOW='\033[1;33m'
+      BLUE='\033[0;34m'
+      NC='\033[0m'
+      echo -e "${BLUE}-------------------------------------------------${NC}"
+      echo -e "${YELLOW}Enshrouded Installscript${NC}"
+      echo -e "${YELLOW}Egg by gOOvER | https://goover.dev${NC}"
+      echo -e "${BLUE}-------------------------------------------------${NC}"
+
+      #apt -y update
+      #apt -y --no-install-recommends install curl lib32gcc-s1 ca-certificates jq dos2unix
+      echo -e "${BLUE}-------------------------------------------------${NC}"
+      echo -e "${YELLOW}download and install steamcmd. please wait...${NC}"
+      echo -e "${BLUE}-------------------------------------------------${NC}"
+      ## just in case someone removed the defaults.
+      if [[ "${STEAM_USER}" == "" ]] || [[ "${STEAM_PASS}" == "" ]]; then
+          echo -e "steam user is not set.\n"
+          echo -e "Using anonymous user.\n"
+          STEAM_USER=anonymous
+          STEAM_PASS=""
+          STEAM_AUTH=""
+      else
+          echo -e "user set to ${STEAM_USER}"
+      fi
+      ## download and install steamcmd
+      cd /tmp
+      mkdir -p /mnt/server/steamcmd
+      curl -sSL -o steamcmd.tar.gz https://steamcdn-a.akamaihd.net/client/installer/steamcmd_linux.tar.gz
+      tar -xzvf steamcmd.tar.gz -C /mnt/server/steamcmd
+      mkdir -p /mnt/server/steamapps # Fix steamcmd disk write error when this folder is missing
+      cd /mnt/server/steamcmd
+      # SteamCMD fails otherwise for some reason, even running as root.
+      # This is changed at the end of the install process anyways.
+      chown -R root:root /mnt
+      export HOME=/mnt/server
+      echo -e "${GREEN}..done..${NC}"
+
+      ## install game using steamcmd
+      echo -e "${BLUE}-------------------------------------------------${NC}"
+      echo -e "${YELLOW}install game using steamcmd. please wait...${NC}"
+      echo -e "${BLUE}-------------------------------------------------${NC}"
+      ./steamcmd.sh +force_install_dir /mnt/server +login ${STEAM_USER} ${STEAM_PASS} ${STEAM_AUTH} $( [[ "${WINDOWS_INSTALL}" == "1" ]] && printf %s '+@sSteamCmdForcePlatformType windows' ) $( [[ "${STEAM_SDK}" == "1" ]] && printf %s '+app_update 1007' ) +app_update ${STEAM_APPID} $( [[ -z ${STEAM_BETAID} ]] || printf %s "-beta ${STEAM_BETAID}" ) $( [[ -z ${STEAM_BETAPASS} ]] || printf %s "-betapassword ${STEAM_BETAPASS}" ) ${INSTALL_FLAGS} validate +quit
+      echo -e "${GREEN}..done..${NC}"
+      ## set up 32 bit libraries
+      mkdir -p /mnt/server/.steam/sdk32
+      cp -v linux32/steamclient.so ../.steam/sdk32/steamclient.so
+
+      ## set up 64 bit libraries
+      mkdir -p /mnt/server/.steam/sdk64
+      cp -v linux64/steamclient.so ../.steam/sdk64/steamclient.so
+      # add below your custom commands if needed
+      FILE=$HOME/enshrouded_server.json
+      if [ -f "$FILE" ]; then
+        echo -e "${BLUE}-------------------------------------------------${NC}"
+        echo -e "${GREEN}enshrouded_server.json found.${NC}"
+        echo -e "${BLUE}-------------------------------------------------${NC}"
+      else
+        echo -e "${BLUE}-------------------------------------------------${NC}"
+        echo -e "${RED}No enshrouded_server.json found. Downloading default...${NC}"
+        echo -e "${BLUE}-------------------------------------------------${NC}"
+        cd "$HOME"
+        curl -sSL -o enshrouded_server.json https://raw.githubusercontent.com/pelican-eggs/games-steamcmd/refs/heads/main/enshrouded/enshrouded_server.json
+        echo -e "${GREEN}..done..${NC}"
+      fi
+      ## install end
+      echo -e "${BLUE}-------------------------------------------------${NC}"
+      echo -e "${GREEN}Installation completed...${NC}"
+      echo -e "${BLUE}-------------------------------------------------${NC}"
+    container: 'ghcr.io/pelican-eggs/installers:debian'
+    entrypoint: bash
+variables:
+  -
+    name: '[SERVER] Steam Query Port'
+    description: 'Steam Query Port'
+    env_variable: QUERY_PORT
+    default_value: '15637'
+    user_viewable: true
+    user_editable: true
+    rules:
+      - required
+      - numeric
+    sort: 1
+  -
+    name: '[SERVER] Auto Update'
+    description: 'Enable automatic updates on boot'
+    env_variable: AUTO_UPDATE
+    default_value: 1
+    user_viewable: true
+    user_editable: true
+    rules:
+      - required
+      - boolean
+    sort: 2
+  -
+    name: '[SERVER] Server Name'
+    description: 'Name of the server'
+    env_variable: SRV_NAME
+    default_value: 'My Server'
+    user_viewable: true
+    user_editable: true
+    rules:
+      - required
+      - string
+    sort: 3
+  -
+    name: '[SERVER] Max Players'
+    description: 'Maximum number of players allowed'
+    env_variable: MAX_PLAYERS
+    default_value: 24
+    user_viewable: true
+    user_editable: true
+    rules:
+      - required
+      - numeric
+    sort: 4
+  -
+    name: '[SERVER] Save Name'
+    description: 'Name of the save-file for the server'
+    env_variable: SAVE_NAME
+    default_value: DedicatedSaveMP
+    user_viewable: true
+    user_editable: true
+    rules:
+      - required
+      - string
+    sort: 5
+  -
+    name: '[STEAM] Steam App ID'
+    description: 'Steam App ID'
+    env_variable: SRCDS_APPID
+    default_value: 2278520
+    user_viewable: false
+    user_editable: false
+    rules:
+      - required
+      - string
+      - 'in:2278520'
+    sort: 6
+  -
+    name: '[SYSTEM] WINDOWS_INSTALL'
+    description: 'DO NOT CHANGE !!!'
+    env_variable: WINDOWS_INSTALL
+    default_value: 1
+    user_viewable: false
+    user_editable: false
+    rules:
+      - required
+      - boolean
+    sort: 7
+  -
+    name: '[SYSTEM] Validate'
+    description: 'Validate the serverfiles through Steam'
+    env_variable: VALIDATE
+    default_value: 0
+    user_viewable: true
+    user_editable: true
+    rules:
+      - required
+      - boolean
+    sort: 8
+  -
+    name: '[SERVER] Difficult Preset'
+    description: 'Difficulty preset for Enshrouded server settings'
+    env_variable: DIFFICULT_PRESET
+    default_value: Default
+    user_viewable: true
+    user_editable: true
+    rules:
+      - required
+      - string
+      - 'in:Default,Relaxed,Hard,Survival,Custom'
+    sort: 9
+ 2>/dev/null || true
+      pkill -KILL -x wineserver 2>/dev/null || true
+
+      kill "$TAIL_PID" 2>/dev/null || true
+      wait "$TAIL_PID" 2>/dev/null || true
+      wait "$PROTON_PID" 2>/dev/null || true
+    }
+
+    trap cleanup INT TERM EXIT
+    wait "$PROTON_PID"
+    SERVER_EXIT=$?
+    cleanup
+    exit "$SERVER_EXIT"
 config:
   files:
     enshrouded_server.json:
